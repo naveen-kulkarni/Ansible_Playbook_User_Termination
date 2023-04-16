@@ -1,0 +1,131 @@
+---
+
+   - hosts : localhost
+     become: yes
+     remote_user: naveen_adm
+
+     vars:
+         ARCHIVE: /net/share-01/prd_nfs_unkno_share_01/home/UNIXTEMPDIR
+         LINUX_PATH: /unixadmin/master_automount_maps/linux/auto.home
+         AIX_PATH: /unixadmin/master_automount_maps/aix/auto_home
+         SOLARIS_PATH: /unixadmin/master_automount_maps/solaris/auto_home
+
+     tasks:
+      - name: Create temprorary file under /tmp/{{username}}
+        command: touch /tmp/{{ username }}_home_{{ ansible_date_time.date }}.txt
+
+      - name: Check "{{ username }}" presence on Linux automountfs
+        shell: |
+                LINNAS_PATH=`cat '{{ LINUX_PATH }}' |grep -w "{{ username }}" |awk ' {print $2 } ' | awk '{print "/"$0}' | sed 's/&//' | sed 's/://'`
+                LINUSER_ID=`cat '{{ LINUX_PATH }}' |grep -w "{{ username }}" |awk ' {print $1 } '`
+                LINUSER_HOMEPATH="$LINNAS_PATH$LINUSER_ID"
+                echo $LINUSER_HOMEPATH  >> /tmp/{{ username }}_home_{{ ansible_date_time.date }}.txt
+        register: linuser_home_path
+
+      - name: Check "{{ username }}" presence on SOLARIS automountfs
+        shell: |
+                SOLNAS_PATH=`cat '{{ SOLARIS_PATH }}' |grep -w "{{ username }}" |awk ' {print $2 } ' | awk '{print "/"$0}' |sed 's/&//' | sed 's/://'`
+                SOLUSER_ID=`cat '{{ SOLARIS_PATH }}' |grep -w "{{ username }}" |awk ' {print $1 } '`
+                SOLUSER_HOMEPATH="$SOLNAS_PATH$SOLUSER_ID"
+                echo $SOLUSER_HOMEPATH >> /tmp/{{ username }}_home_{{ ansible_date_time.date }}.txt
+        register: soluser_home_path
+
+      - name: Check "{{ username }}" presence on AIX automountfs
+        shell: |
+                AIXNAS_PATH=`cat '{{ AIX_PATH }}' |grep -w "{{ username }}" |awk ' {print $2 } ' | awk '{print "/"$0}' | sed 's/&//' | sed 's/://'`
+                AIXUSER_ID=`cat '{{ AIX_PATH }}' |grep -w "{{ username }}" |awk ' {print $1 } '`
+                AIXUSER_HOMEPATH="$AIXNAS_PATH$AIXUSER_ID"
+                echo $AIXUSER_HOMEPATH >> /tmp/{{ username }}_home_{{ ansible_date_time.date }}.txt
+        register: aixuser_home_path
+
+      - shell: "cat /tmp/{{ username }}_home_{{ ansible_date_time.date }}.txt|sort|uniq > /tmp/{{ username }}_home_final_{{ ansible_date_time.date }}.txt"
+        connection: local
+
+      - shell: cat /tmp/{{ username }}_home_final_{{ ansible_date_time.date }}.txt | awk 'NF'|wc -l
+        register: Usercheckfail
+
+      - name: Fail, if the user is not available any of the autofs file
+        fail: msg="{{ username }} is not available any of the autofs file and no action required from Unix"
+        when: Usercheckfail.stdout == "0"
+
+      - meta: end_play
+        when: Usercheckfail.stdout == "0"
+
+      - name: View the contents
+        shell: "sed -n '1p' /tmp/{{ username }}_home_final_{{ ansible_date_time.date }}.txt"
+        connection: local
+        register: user_nas_path1
+
+      - name: View the contents
+        shell: "sed -n '2p' /tmp/{{ username }}_home_final_{{ ansible_date_time.date }}.txt"
+        connection: local
+        register: user_nas_path2
+
+      - name: View the contents
+        shell: "sed -n '3p' /tmp/{{ username }}_home_final_{{ ansible_date_time.date }}.txt"
+        connection: local
+        register: user_nas_path3
+
+      - name: Create a tar.gz archive of a Home Directory.
+        archive:
+           path: "/net{{user_nas_path1.stdout}}"
+           dest: "{{ARCHIVE}}/{{username}}_path1.tgz"
+        when: user_nas_path1.stdout != ""
+
+      - name: Create a tar.gz archive of a Home Directory.
+        archive:
+           path: "/net{{user_nas_path2.stdout}}"
+           dest: "{{ARCHIVE}}/{{username}}_path2.tgz"
+        when: user_nas_path2.stdout != ""
+
+      - name: Create a tar.gz archive of a Home Directory.
+        archive:
+           path: "/netcd /net{{user_nas_path3.stdout}}"
+           dest: "{{ARCHIVE}}/{{username}}_path3.tgz"
+        when: user_nas_path3.stdout != ""
+
+      - name: Remove "{{ username }}" from LINUX auto.home config
+        lineinfile:
+             dest: '{{LINUX_PATH}}'
+             regexp: "^{{ username }}"
+             state: absent
+             backup: yes
+
+      - name: Remove "{{ username }}" from AIX auto.home config
+        lineinfile:
+             dest: '{{AIX_PATH}}'
+             regexp: "^{{ username }}"
+             state: absent
+             backup: yes
+
+      - name: Remove "{{ username }}" from SOLARIS auto.home config
+        lineinfile:
+             dest: '{{SOLARIS_PATH}}'
+             regexp: "^{{ username }}"
+             state: absent
+             backup: yes
+
+      - name: Check the User entries in Master Sudoers
+        shell: |
+             cp /home/naveen/automation/ad_hoc/User_Termination/email_template_autofs_user.j2 /tmp/{{ username }}_email_template_autofs
+             /var/tmp/sudoers_grepable.pl | grep -w {{ username }}|egrep -v "uninitialized" |awk '{print $1," ",$2}'|sort -rn |uniq >> /tmp/{{ username }}_email_template_autofs
+        register: taskinfo
+
+      - name: Send e-mail to a bunch of users
+        mail:
+           port=25
+           subject="{{ username }} Termination Details"
+           body="{{ lookup('file', '/tmp/{{ username }}_email_template_autofs') }}"
+           from=naveenvk888@gmail.com
+           to="naveenvk88@gmail.com"
+           charset=utf8
+
+      - name: Deleting {{username}} temp files
+        file:
+          path: "{{ item }}"
+          state: absent
+        with_items:
+          - /tmp/{{ username }}_home_final_{{ ansible_date_time.date }}.txt
+          - /tmp/{{ username }}_home_{{ ansible_date_time.date }}.txt
+          - /tmp/{{ username }}_email_template_autofs
+
